@@ -1,0 +1,72 @@
+name: Build
+
+# Build bản portable để chạy thử, KHÔNG tạo tag, KHÔNG tạo Release, KHÔNG đẩy lên Gitee.
+# Kết quả nằm ở mục "Artifacts" cuối trang của lần chạy (giữ 7 ngày).
+# Phát hành chính thức vẫn do release.yml lo (push tag v*).
+on:
+  workflow_dispatch:
+  pull_request:
+    # Chỉ build khi PR đụng vào thứ ảnh hưởng đến gói, đỡ tốn phút runner Windows
+    paths:
+      - 'build/**'
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'electron-builder.yml'
+      - '.github/workflows/build.yml'
+
+# Có commit mới trên cùng nhánh/PR thì huỷ lần build cũ đang chạy
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+# Workflow này chỉ đọc mã, không cần quyền ghi
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    name: Build bản portable (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Giữ nguyên mirror như release.yml để hành vi tải Electron giống nhau
+      - name: Cài dependencies (gồm Electron)
+        run: npm ci
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+
+      # Ra thư mục dist/ApkStart-win64-portable (build/pack.js cũng chạy guard-standalone)
+      - name: Đóng gói bản portable
+        run: npm run pack
+
+      # Dùng lại build/zip.js (7-Zip) giống release.yml; vượt 100MiB thì job fail
+      - name: Nén (7-Zip, giới hạn 100MiB)
+        id: zip
+        shell: pwsh
+        run: |
+          $ver = node -p "require('./package.json').version"
+          $sha = "${{ github.sha }}".Substring(0, 7)
+          $name = "ApkStart-v$ver-dev.$sha-win64-portable.zip"
+          node build/zip.js dist/ApkStart-win64-portable $name --limit-mb 100
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Item $name | Select-Object Name, Length
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      # File đã là .zip nên tắt nén lại (compression-level: 0), tránh nén đôi
+      - name: Tải artifact lên
+        uses: actions/upload-artifact@v4
+        with:
+          name: ApkStart-portable-${{ github.run_number }}
+          path: ${{ steps.zip.outputs.name }}
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
